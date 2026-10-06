@@ -1,0 +1,27 @@
+services:
+  fpl-mcp:
+    build: .
+    image: tashi-fpl-mcp:1.0.0
+    restart: unless-stopped
+    env_file:
+      - .env
+    ports:
+      - "127.0.0.1:18080:8000"
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import socket; s=socket.create_connection(('127.0.0.1',8000),3); s.close()"
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: true
+    tmpfs:
+      - /tmp:size=32m,noexec,nosuid
+
