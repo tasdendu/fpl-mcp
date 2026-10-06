@@ -66,18 +66,14 @@ def test_streamable_http_discovery_call_validation_and_host_guard():
 
 
 @pytest.mark.asyncio
-async def test_future_transfer_state_is_not_inferred(monkeypatch):
+async def test_my_team_returns_authenticated_private_fields():
     from test_analysis import FakeClient
 
     from fpl_mcp.analysis import FPLAnalysis
 
     fake = FakeClient()
-
-    async def entry(manager_id):
-        return {"current_event": 4}
-
-    monkeypatch.setattr(fake, "entry", entry, raising=False)
     squad = await FPLAnalysis(fake, 1).my_team()
-    assert squad["gameweek"] == 4
-    assert squad["current_free_transfers"] is None
-    assert squad["current_bank"] is None
+    assert squad["squad_scope"] == "Authenticated current private team"
+    assert squad["current_free_transfers"] == 2
+    assert squad["current_bank"] == 1.5
+    assert squad["picks"][0]["selling_price"] == 7.5

@@ -30,3 +30,48 @@ async def test_not_found_has_clear_error(client: FPLClient) -> None:
 
     with pytest.raises(FPLAPIError, match="not found"):
         await client.entry(999)
+
+
+@respx.mock
+async def test_private_team_refreshes_token_and_retries_authorized_request() -> None:
+    settings = Settings(
+        fpl_base_url="https://example.test/api",
+        fpl_token_url="https://auth.example.test/as/token",
+        fpl_refresh_token="refresh-one",
+    )
+    client = FPLClient(settings)
+    token_route = respx.post("https://auth.example.test/as/token").mock(
+        side_effect=[
+            httpx.Response(
+                200,
+                json={
+                    "access_token": "access-one",
+                    "refresh_token": "refresh-two",
+                    "expires_in": 3600,
+                },
+            ),
+            httpx.Response(200, json={"access_token": "access-two", "expires_in": 3600}),
+        ]
+    )
+    team_route = respx.get("https://example.test/api/my-team/354978/").mock(
+        side_effect=[
+            httpx.Response(403),
+            httpx.Response(200, json={"picks": [{"element": 1}], "chips": []}),
+        ]
+    )
+
+    result = await client.my_team(354978)
+
+    assert result["picks"][0]["element"] == 1
+    assert token_route.call_count == 2
+    assert team_route.call_count == 2
+    assert team_route.calls[0].request.headers["X-API-Authorization"] == "Bearer access-one"
+    assert team_route.calls[1].request.headers["X-API-Authorization"] == "Bearer access-two"
+    assert "refresh-two" in str(token_route.calls[1].request.content)
+
+
+@respx.mock
+async def test_private_team_requires_refresh_token() -> None:
+    client = FPLClient(Settings(fpl_base_url="https://example.test/api"))
+    with pytest.raises(FPLAPIError, match="FPL_REFRESH_TOKEN"):
+        await client.my_team(354978)

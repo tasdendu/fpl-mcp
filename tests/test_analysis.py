@@ -28,6 +28,22 @@ def player(player_id: int, name: str, team: int, position: int = 3) -> dict[str,
 
 
 class FakeClient:
+    async def my_team(self, manager_id: int) -> dict[str, Any]:
+        return {
+            "transfers": {"bank": 15, "value": 1000, "limit": 2, "cost": 0},
+            "chips": [{"name": "wildcard", "event": 4, "played_time": None}],
+            "picks": [
+                {
+                    "element": 10,
+                    "position": 1,
+                    "multiplier": 2,
+                    "is_captain": True,
+                    "purchase_price": 70,
+                    "selling_price": 75,
+                }
+            ],
+        }
+
     async def bootstrap(self) -> dict[str, Any]:
         return {
             "events": [
@@ -164,3 +180,13 @@ async def test_partial_ownership_reports_coverage(analysis: FPLAnalysis, monkeyp
     assert result["managers_analyzed"] == 2
     assert result["unavailable_manager_ids"] == [3]
     assert result["players"][0]["effective_ownership_percent"] == 150
+
+
+async def test_my_team_uses_authenticated_private_squad(analysis: FPLAnalysis) -> None:
+    result = await analysis.my_team()
+    assert result["squad_scope"] == "Authenticated current private team"
+    assert result["current_bank"] == 1.5
+    assert result["current_free_transfers"] == 2
+    assert result["chips"][0]["name"] == "wildcard"
+    assert result["picks"][0]["selling_price"] == 7.5
+    assert result["picks"][0]["purchase_price"] == 7.0

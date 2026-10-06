@@ -10,6 +10,9 @@ class Settings(BaseSettings):
     fpl_entry_id: int = Field(default=354978, ge=1)
     fpl_base_url: str = "https://fantasy.premierleague.com/api"
     fpl_user_agent: str = "Tashi-FPL-MCP/1.0"
+    fpl_refresh_token: str | None = None
+    fpl_token_url: str = "https://account.premierleague.com/as/token"
+    fpl_client_id: str = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
     max_league_pages: int = Field(default=5, ge=1, le=20)
     mcp_host: str = "0.0.0.0"

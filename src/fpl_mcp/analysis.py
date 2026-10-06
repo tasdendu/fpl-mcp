@@ -156,15 +156,26 @@ class FPLAnalysis:
         return {"manager_id": manager_id, **history}
 
     async def my_team(self) -> dict[str, Any]:
-        entry = await self.client.entry(self.default_manager_id)
-        gameweek = entry.get("current_event")
-        if not gameweek:
-            raise ValueError("No public gameweek squad is available for this entry yet.")
-        squad = await self.manager_gameweek(int(gameweek))
-        squad["squad_scope"] = "Latest published deadline squad, not the private pre-deadline squad"
-        squad["current_free_transfers"] = None
-        squad["current_bank"] = None
-        return squad
+        players, teams, _ = await self.context()
+        payload = await self.client.my_team(self.default_manager_id)
+        transfers = payload.get("transfers", {}) or {}
+        picks = []
+        for pick in payload.get("picks", []):
+            row = self._pick_view(pick, players, teams)
+            row["purchase_price"] = _number(pick.get("purchase_price")) / 10
+            row["selling_price"] = _number(pick.get("selling_price")) / 10
+            picks.append(row)
+        return {
+            "manager_id": self.default_manager_id,
+            "squad_scope": "Authenticated current private team",
+            "current_bank": _number(transfers.get("bank")) / 10,
+            "squad_value": _number(transfers.get("value")) / 10,
+            "current_free_transfers": transfers.get("limit"),
+            "transfer_cost": transfers.get("cost"),
+            "chips": payload.get("chips", []),
+            "picks": picks,
+            "transfers": payload.get("transfers", []),
+        }
 
     async def price_changes(self) -> dict[str, Any]:
         players, teams, _ = await self.context()
