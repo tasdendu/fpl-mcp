@@ -9,6 +9,7 @@ import httpx
 
 from .cache import AsyncTTLCache
 from .config import Settings
+from .token_store import TokenStore
 
 source_records: ContextVar[list[dict[str, Any]] | None] = ContextVar("sources", default=None)
 
@@ -26,11 +27,25 @@ class FPLClient:
         self._access_token: str | None = None
         self._token_expires_at = 0.0
         self._refresh_token = settings.fpl_refresh_token
+        self._token_store = TokenStore(settings.fpl_token_db) if settings.fpl_token_db else None
+        self._store_loaded = False
+
+    async def _load_stored_refresh_token(self) -> None:
+        """Prefer the persisted (latest rotated) token; seed the store from .env once."""
+        if self._store_loaded or self._token_store is None:
+            return
+        stored = await asyncio.to_thread(self._token_store.load)
+        if stored:
+            self._refresh_token = stored
+        elif self._refresh_token:
+            await asyncio.to_thread(self._token_store.save, self._refresh_token)
+        self._store_loaded = True
 
     async def _get_access_token(self, *, force_refresh: bool = False) -> str:
-        if not self._refresh_token:
-            raise FPLAPIError("FPL_REFRESH_TOKEN is required to read the private team")
         async with self._token_lock:
+            await self._load_stored_refresh_token()
+            if not self._refresh_token:
+                raise FPLAPIError("FPL_REFRESH_TOKEN is required to read the private team")
             if (
                 not force_refresh
                 and self._access_token
@@ -62,6 +77,9 @@ class FPLClient:
                 )
                 if payload.get("refresh_token"):
                     self._refresh_token = str(payload["refresh_token"])
+                    if self._token_store is not None:
+                        # Persist immediately: the previous token is now invalid.
+                        await asyncio.to_thread(self._token_store.save, self._refresh_token)
                 return self._access_token
             except FPLAPIError:
                 raise

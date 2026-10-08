@@ -24,6 +24,7 @@ dev = [
 
 [project.scripts]
 fpl-mcp = "fpl_mcp.server:main"
+fpl-mcp-set-token = "fpl_mcp.token_store:set_token_main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fpl_mcp"]

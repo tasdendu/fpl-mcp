@@ -11,6 +11,8 @@ class Settings(BaseSettings):
     fpl_base_url: str = "https://fantasy.premierleague.com/api"
     fpl_user_agent: str = "Tashi-FPL-MCP/1.0"
     fpl_refresh_token: str | None = None
+    # SQLite file that persists the rotating refresh token; unset keeps it in memory only.
+    fpl_token_db: str | None = None
     fpl_token_url: str = "https://account.premierleague.com/as/token"
     fpl_client_id: str = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)

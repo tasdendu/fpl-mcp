@@ -18,6 +18,9 @@ COPY src ./src
 
 RUN pip install --no-deps .
 
+# Writable home for the persisted refresh token (mounted as a named volume).
+RUN mkdir -p /data && chown app:app /data
+
 USER app
 EXPOSE 8000
 
