@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from functools import wraps
 from typing import Annotated, Any
 
+import uvicorn
 from mcp.server.fastmcp import FastMCP
 from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
@@ -224,8 +228,45 @@ async def get_live_mini_league(
     return await analysis.live_league(league_id, pages)
 
 
+@mcp.tool(title="Check FPL login status", annotations=READ_ONLY)
+async def get_auth_status() -> dict[str, Any]:
+    """Report whether the private-team login works; never returns the token itself."""
+    return {
+        "configured": client.auth_configured,
+        "persistent_store": bool(settings.fpl_token_db),
+        "keepalive_hours": settings.fpl_token_keepalive_hours,
+        "alerts_configured": bool(
+            (settings.alert_telegram_bot_token and settings.alert_telegram_chat_id)
+            or settings.alert_webhook_url
+        ),
+        **client.auth_status,
+        "checked_at_utc": datetime.now(UTC).isoformat(),
+    }
+
+
+def build_app():
+    """Streamable-HTTP app with the token keep-alive running for the app's lifetime."""
+    app = mcp.streamable_http_app()
+    inner = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan(scope_app):
+        async with inner(scope_app):
+            task = asyncio.create_task(client.keepalive())
+            try:
+                yield
+            finally:
+                task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+
+    app.router.lifespan_context = lifespan
+    return app
+
+
 def main() -> None:
-    mcp.run(transport="streamable-http")
+    logging.basicConfig(level=logging.INFO)
+    uvicorn.run(build_app(), host=settings.mcp_host, port=settings.mcp_port, log_level="info")
 
 
 if __name__ == "__main__":

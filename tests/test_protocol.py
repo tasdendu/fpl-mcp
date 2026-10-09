@@ -30,7 +30,7 @@ def test_streamable_http_discovery_call_validation_and_host_guard():
         )
         assert initialized["serverInfo"]["name"] == "Tashi FPL Analyst"
         discovered = rpc("tools/list")["tools"]
-        assert len(discovered) == 16
+        assert len(discovered) == 17
         assert all(tool["annotations"]["readOnlyHint"] for tool in discovered)
         assert all(tool.get("outputSchema") for tool in discovered)
         with respx.mock:
@@ -77,3 +77,14 @@ async def test_my_team_returns_authenticated_private_fields():
     assert squad["current_free_transfers"] == 2
     assert squad["current_bank"] == 1.5
     assert squad["picks"][0]["selling_price"] == 7.5
+
+
+def test_app_with_keepalive_starts_and_stops_cleanly(monkeypatch):
+    from fpl_mcp.server import build_app
+
+    # A session manager runs once per instance; earlier tests already used one.
+    monkeypatch.setattr(mcp, "_session_manager", None)
+
+    with TestClient(build_app(), base_url="http://localhost") as client:
+        response = client.get("/not-mcp")
+        assert response.status_code == 404

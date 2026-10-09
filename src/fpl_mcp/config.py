@@ -13,6 +13,12 @@ class Settings(BaseSettings):
     fpl_refresh_token: str | None = None
     # SQLite file that persists the rotating refresh token; unset keeps it in memory only.
     fpl_token_db: str | None = None
+    # Refresh this often even when idle, so the refresh token never lapses (0 disables).
+    fpl_token_keepalive_hours: float = Field(default=6.0, ge=0, le=72)
+    # Optional alerts when the FPL login needs attention.
+    alert_telegram_bot_token: str | None = None
+    alert_telegram_chat_id: str | None = None
+    alert_webhook_url: str | None = None
     fpl_token_url: str = "https://account.premierleague.com/as/token"
     fpl_client_id: str = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)
