@@ -136,9 +136,35 @@ async def test_claude_request_uses_mcp_connector_and_continues_paused_turns(tmp_
     assert "Time remaining: exactly 22h 00m" in task
 
 
-async def test_brief_without_api_key_still_explains(tmp_path) -> None:
-    text = await make_advisor(tmp_path).brief(6, "preview", DEADLINE)
-    assert "ANTHROPIC_API_KEY is not set" in text
+async def test_without_api_key_sends_rule_based_squad_check(tmp_path) -> None:
+    advisor = make_advisor(tmp_path)
+    squad = []
+    for slot in range(1, 16):
+        row = pick(slot, f"P{slot}")
+        row.update(position="Midfielder", squad_position=slot)
+        squad.append(row)
+    squad[9].update(name="Haaland", is_captain=True)
+    squad[10].update(name="João Pedro", status="d", chance_next_round=75)
+    squad[8].update(name="Groß", is_vice_captain=True)
+    advisor.analysis.picks = squad
+
+    async def my_team():
+        return {
+            "picks": squad,
+            "current_bank": 0.5,
+            "current_free_transfers": 1,
+            "chips": [{"name": "wildcard", "status_for_entry": "available"}],
+        }
+
+    advisor.analysis.my_team = my_team
+    now = datetime(2026, 10, 10, 7, 0, tzinfo=UTC)
+    text = await advisor.brief(6, "final", DEADLINE, now)
+
+    assert "(3h 00m left)" in text
+    assert "Bank £0.5m | Free transfers: 1 | Chips: Wildcard" in text
+    assert "CAPTAIN: Haaland" in text
+    assert "MID João Pedro ⚠️ 75%" in text
+    assert "🟡 João Pedro flagged ⚠️ 75%: bench cover is ready" in text
 
 
 def test_advisor_reports_why_it_is_off() -> None:

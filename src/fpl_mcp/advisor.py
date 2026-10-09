@@ -6,8 +6,10 @@ processes refreshing the same rotating token would invalidate each other).
 * Squad watch (every tick, no LLM): alerts when a player in Tashi's squad gets
   an injury/suspension flag, changes chance of playing, recovers, or changes
   price.
-* Briefings (Claude via the Messages API MCP connector): a preview about a day
-  before each deadline and a final call a few hours before. Each is sent once.
+* Deadline messages: a preview about a day before each deadline and a final
+  call a few hours before, each sent once. With ANTHROPIC_API_KEY they are full
+  Claude briefings (via the Messages API MCP connector); without it they are a
+  rule-based squad check (flags, captain, bench cover, bank, transfers, chips).
 """
 
 from __future__ import annotations
@@ -34,6 +36,13 @@ log = logging.getLogger(__name__)
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 MCP_BETA = "mcp-client-2025-11-20"
 MCP_SERVER_NAME = "tashi-fpl"
+
+CHIP_NAMES = {
+    "wildcard": "Wildcard",
+    "freehit": "Free Hit",
+    "bboost": "Bench Boost",
+    "3xc": "Triple Captain",
+}
 
 UNAVAILABLE = {"i": "injured", "s": "suspended", "u": "unavailable", "n": "not available"}
 
@@ -207,7 +216,7 @@ class Advisor:
             f"Deadline: {deadline_local} Bhutan time ({left} left)\n\n"
         )
         if not self.settings.anthropic_api_key:
-            return header + "ANTHROPIC_API_KEY is not set, so no briefing could be written."
+            return header + await self.squad_check()
         task = (
             f"Write the GW{gameweek} "
             + (
@@ -227,6 +236,61 @@ class Advisor:
         except (httpx.HTTPError, ValueError, KeyError) as exc:
             log.warning("Briefing generation failed: %s", exc)
             return header + f"Briefing could not be generated ({exc}). Ask Claude in chat."
+
+    async def squad_check(self) -> str:
+        """Rule-based pre-deadline check (no API key needed): what could cost points."""
+        team = await self.analysis.my_team()
+        picks = sorted(team.get("picks", []), key=lambda row: row.get("squad_position") or 99)
+        starters = [row for row in picks if (row.get("squad_position") or 99) <= 11]
+        bench = [row for row in picks if (row.get("squad_position") or 0) > 11]
+        captain = next((row for row in picks if row.get("is_captain")), None)
+        vice = next((row for row in picks if row.get("is_vice_captain")), None)
+        chips = [
+            CHIP_NAMES.get(str(chip.get("name")), str(chip.get("name")))
+            for chip in team.get("chips", [])
+            if chip.get("status_for_entry") == "available"
+        ]
+
+        def flag(row: dict[str, Any]) -> str:
+            if row.get("status") in (None, "a"):
+                return ""
+            chance = row.get("chance_next_round")
+            return f" ⚠️ {chance}%" if chance is not None else " ⚠️ out"
+
+        verdict = []
+        if captain and captain.get("status") not in (None, "a"):
+            verdict.append(
+                f"🔴 Captain {captain['name']} is flagged{flag(captain)}: change captain"
+            )
+        flagged = [row for row in starters if row.get("status") not in (None, "a")]
+        for row in flagged:
+            if row is not captain:
+                verdict.append(f"🟡 {row['name']} flagged{flag(row)}: bench cover is ready")
+        bench_flagged = [row for row in bench[1:] if row.get("status") not in (None, "a")]
+        if flagged and bench_flagged:
+            verdict.append(
+                "🔴 A flagged starter could be covered by a flagged sub: fix bench order"
+            )
+        if not verdict:
+            verdict.append("🟢 No injury or suspension flags in your XI")
+        verdict.append(f"🟢 {team.get('current_free_transfers')} free transfer(s) available")
+
+        lines = [
+            f"Bank £{team.get('current_bank', 0):.1f}m | Free transfers: "
+            f"{team.get('current_free_transfers')} | Chips: {', '.join(chips) or 'none'}",
+            "",
+            "STARTING XI",
+            *[f"{row['position'][:3].upper()} {row['name']}{flag(row)}" for row in starters],
+            "",
+            f"CAPTAIN: {captain['name'] if captain else '-'}{flag(captain) if captain else ''}",
+            f"VICE-CAPTAIN: {vice['name'] if vice else '-'}{flag(vice) if vice else ''}",
+            "",
+            "BENCH: " + ", ".join(f"{row['name']}{flag(row)}" for row in bench),
+            "",
+            "PUNDIT'S VERDICT",
+            *verdict,
+        ]
+        return "\n".join(lines)
 
     async def _ask_claude(self, task: str) -> str:
         headers = {
