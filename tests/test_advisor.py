@@ -1,0 +1,147 @@
+import json
+from datetime import UTC, datetime, timedelta
+
+import httpx
+import pytest
+import respx
+
+from fpl_mcp import advisor as advisor_module
+from fpl_mcp.advisor import ANTHROPIC_URL, Advisor
+from fpl_mcp.alerts import split_message
+from fpl_mcp.config import Settings
+
+DEADLINE = datetime(2026, 10, 10, 10, 0, tzinfo=UTC)
+
+
+def pick(player_id, name, status="a", chance=None, price=6.0, news=None):
+    return {
+        "player_id": player_id,
+        "name": name,
+        "team": "Chelsea",
+        "status": status,
+        "chance_next_round": chance,
+        "news": news,
+        "price": price,
+    }
+
+
+class FakeAnalysis:
+    def __init__(self):
+        self.picks = []
+
+    async def my_team(self):
+        return {"picks": self.picks}
+
+
+class FakeClient:
+    async def bootstrap(self):
+        return {"events": [{"id": 6, "is_next": True, "deadline_time": "2026-10-10T10:00:00Z"}]}
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    messages: list[str] = []
+
+    async def fake_send(settings, text):
+        messages.append(text)
+        return True
+
+    monkeypatch.setattr(advisor_module, "send_message", fake_send)
+    return messages
+
+
+def make_advisor(tmp_path, **extra) -> Advisor:
+    settings = Settings(
+        fpl_token_db=str(tmp_path / "state.db"),
+        advisor_enabled=True,
+        alert_telegram_bot_token="t",
+        alert_telegram_chat_id="1",
+        **extra,
+    )
+    advisor = Advisor(settings, FakeClient(), FakeAnalysis())
+    return advisor
+
+
+async def test_squad_watch_alerts_on_flag_and_price_changes_only(tmp_path, sent) -> None:
+    advisor = make_advisor(tmp_path)
+    advisor.analysis.picks = [pick(1, "João Pedro", "d", 75), pick(2, "Haaland", price=15.6)]
+    assert await advisor.watch_squad() == []  # baseline
+    assert await advisor.watch_squad() == []  # nothing changed
+
+    advisor.analysis.picks = [
+        pick(1, "João Pedro", "i", 0, news="Knee injury"),
+        pick(2, "Haaland", price=15.7),
+        pick(3, "Schade"),  # new signing: no alert
+    ]
+    lines = await advisor.watch_squad()
+
+    assert lines == [
+        "🔴 João Pedro (Chelsea) injured (Knee injury)",
+        "📈 Haaland price £15.6m → £15.7m",
+    ]
+    assert len(sent) == 1
+
+
+async def test_briefings_are_sent_once_per_window(tmp_path, sent, monkeypatch) -> None:
+    advisor = make_advisor(tmp_path)
+    kinds: list[str] = []
+
+    async def fake_brief(gameweek, kind, deadline):
+        kinds.append(kind)
+        return f"brief {kind}"
+
+    monkeypatch.setattr(advisor, "brief", fake_brief)
+
+    assert await advisor.deadline_briefs(DEADLINE - timedelta(hours=30)) is None
+    assert await advisor.deadline_briefs(DEADLINE - timedelta(hours=20)) == "preview"
+    assert await advisor.deadline_briefs(DEADLINE - timedelta(hours=10)) is None
+    assert await advisor.deadline_briefs(DEADLINE - timedelta(hours=2)) == "final"
+    assert await advisor.deadline_briefs(DEADLINE - timedelta(hours=1)) is None
+    assert await advisor.deadline_briefs(DEADLINE + timedelta(hours=1)) is None
+    assert kinds == ["preview", "final"]
+    assert sent == ["brief preview", "brief final"]
+
+
+@respx.mock
+async def test_claude_request_uses_mcp_connector_and_continues_paused_turns(tmp_path) -> None:
+    advisor = make_advisor(tmp_path, anthropic_api_key="sk-test")
+    route = respx.post(ANTHROPIC_URL).mock(
+        side_effect=[
+            httpx.Response(200, json={"stop_reason": "pause_turn", "content": []}),
+            httpx.Response(
+                200,
+                json={
+                    "stop_reason": "end_turn",
+                    "content": [{"type": "text", "text": "STARTING XI ...\n🟢 Captain Haaland"}],
+                },
+            ),
+        ]
+    )
+
+    text = await advisor.brief(6, "final", DEADLINE)
+
+    assert text.startswith("⚽ GW6 FINAL CALL\nDeadline: Sat 10 Oct 16:00 (Bhutan)")
+    assert "🟢 Captain Haaland" in text
+    request = route.calls[0].request
+    body = json.loads(request.content)
+    assert request.headers["anthropic-beta"] == "mcp-client-2025-11-20"
+    assert body["mcp_servers"][0]["url"] == "https://fpl.dcpl.bt/mcp"
+    assert body["tools"] == [{"type": "mcp_toolset", "mcp_server_name": "tashi-fpl"}]
+    assert len(json.loads(route.calls[1].request.content)["messages"]) == 2
+
+
+async def test_brief_without_api_key_still_explains(tmp_path) -> None:
+    text = await make_advisor(tmp_path).brief(6, "preview", DEADLINE)
+    assert "ANTHROPIC_API_KEY is not set" in text
+
+
+def test_advisor_reports_why_it_is_off() -> None:
+    advisor = Advisor(Settings(), FakeClient(), FakeAnalysis())
+    assert "ADVISOR_ENABLED is off" in advisor.enabled_problems()
+
+
+def test_split_message_respects_telegram_limit() -> None:
+    text = "\n".join(f"line {i} " + "x" * 50 for i in range(200))
+    chunks = split_message(text, limit=1000)
+    assert all(len(chunk) <= 1000 for chunk in chunks)
+    assert "".join(chunks).replace("\n", "") == text.replace("\n", "")

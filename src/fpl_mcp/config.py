@@ -19,6 +19,15 @@ class Settings(BaseSettings):
     alert_telegram_bot_token: str | None = None
     alert_telegram_chat_id: str | None = None
     alert_webhook_url: str | None = None
+    # Proactive advisor: squad watch + pre-deadline briefings sent to Telegram/webhook.
+    advisor_enabled: bool = False
+    anthropic_api_key: str | None = None
+    advisor_model: str = "claude-sonnet-5-5"
+    advisor_mcp_url: str = "https://fpl.dcpl.bt/mcp"
+    advisor_interval_minutes: int = Field(default=30, ge=5, le=360)
+    advisor_preview_hours: float = Field(default=24.0, gt=0, le=96)
+    advisor_final_hours: float = Field(default=3.0, gt=0, le=24)
+    advisor_utc_offset_hours: float = Field(default=6.0, ge=-12, le=14)
     fpl_token_url: str = "https://account.premierleague.com/as/token"
     fpl_client_id: str = "bfcbaf69-aade-4c1b-8f00-c1cb8a193030"
     request_timeout_seconds: float = Field(default=15.0, gt=0, le=60)

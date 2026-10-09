@@ -13,6 +13,8 @@ from mcp.server.transport_security import TransportSecuritySettings
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
+from .advisor import Advisor
+from .alerts import telegram_configured
 from .analysis import FPLAnalysis
 from .client import FPLClient, source_records
 from .config import get_settings
@@ -20,6 +22,7 @@ from .config import get_settings
 settings = get_settings()
 client = FPLClient(settings)
 analysis = FPLAnalysis(client, settings.fpl_entry_id)
+advisor = Advisor(settings, client, analysis)
 
 READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, openWorldHint=True)
 
@@ -235,10 +238,9 @@ async def get_auth_status() -> dict[str, Any]:
         "configured": client.auth_configured,
         "persistent_store": bool(settings.fpl_token_db),
         "keepalive_hours": settings.fpl_token_keepalive_hours,
-        "alerts_configured": bool(
-            (settings.alert_telegram_bot_token and settings.alert_telegram_chat_id)
-            or settings.alert_webhook_url
-        ),
+        "alerts_configured": bool(telegram_configured(settings) or settings.alert_webhook_url),
+        "advisor_running": not advisor.enabled_problems(),
+        "advisor_problems": advisor.enabled_problems(),
         **client.auth_status,
         "checked_at_utc": datetime.now(UTC).isoformat(),
     }
@@ -252,13 +254,15 @@ def build_app():
     @asynccontextmanager
     async def lifespan(scope_app):
         async with inner(scope_app):
-            task = asyncio.create_task(client.keepalive())
+            tasks = [asyncio.create_task(client.keepalive()), asyncio.create_task(advisor.run())]
             try:
                 yield
             finally:
-                task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await task
+                for task in tasks:
+                    task.cancel()
+                for task in tasks:
+                    with suppress(asyncio.CancelledError):
+                        await task
 
     app.router.lifespan_context = lifespan
     return app
