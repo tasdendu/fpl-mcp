@@ -86,7 +86,7 @@ async def test_briefings_are_sent_once_per_window(tmp_path, sent, monkeypatch) -
     advisor = make_advisor(tmp_path)
     kinds: list[str] = []
 
-    async def fake_brief(gameweek, kind, deadline):
+    async def fake_brief(gameweek, kind, deadline, now):
         kinds.append(kind)
         return f"brief {kind}"
 
@@ -118,9 +118,12 @@ async def test_claude_request_uses_mcp_connector_and_continues_paused_turns(tmp_
         ]
     )
 
-    text = await advisor.brief(6, "final", DEADLINE)
+    now = datetime(2026, 10, 9, 12, 0, tzinfo=UTC)  # Fri 18:00 Bhutan
+    text = await advisor.brief(6, "final", DEADLINE, now)
 
-    assert text.startswith("⚽ GW6 FINAL CALL\nDeadline: Sat 10 Oct 16:00 (Bhutan)")
+    assert text.startswith(
+        "⚽ GW6 FINAL CALL\nDeadline: Sat 10 Oct 16:00 Bhutan time (22h 00m left)"
+    )
     assert "🟢 Captain Haaland" in text
     request = route.calls[0].request
     body = json.loads(request.content)
@@ -128,6 +131,9 @@ async def test_claude_request_uses_mcp_connector_and_continues_paused_turns(tmp_
     assert body["mcp_servers"][0]["url"] == "https://fpl.dcpl.bt/mcp"
     assert body["tools"] == [{"type": "mcp_toolset", "mcp_server_name": "tashi-fpl"}]
     assert len(json.loads(route.calls[1].request.content)["messages"]) == 2
+    task = body["messages"][0]["content"]
+    assert "Current time: Fri 09 Oct 18:00 Bhutan time" in task
+    assert "Time remaining: exactly 22h 00m" in task
 
 
 async def test_brief_without_api_key_still_explains(tmp_path) -> None:

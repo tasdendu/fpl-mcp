@@ -188,17 +188,23 @@ class Advisor:
                 key = f"brief:gw{event['id']}:{kind}"
                 if await asyncio.to_thread(self._get, key):
                     return None
-                text = await self.brief(int(event["id"]), kind, deadline)
+                text = await self.brief(int(event["id"]), kind, deadline, now)
                 if await send_message(self.settings, text):
                     await asyncio.to_thread(self._set, key, True)
                 return kind
         return None
 
-    async def brief(self, gameweek: int, kind: str, deadline: datetime) -> str:
-        local = deadline.astimezone(self.local_tz).strftime("%a %d %b %H:%M")
+    async def brief(
+        self, gameweek: int, kind: str, deadline: datetime, now: datetime | None = None
+    ) -> str:
+        now = now or datetime.now(UTC)
+        fmt = "%a %d %b %H:%M"
+        deadline_local = deadline.astimezone(self.local_tz).strftime(fmt)
+        now_local = now.astimezone(self.local_tz).strftime(fmt)
+        left = _time_left(deadline - now)
         header = (
             f"⚽ GW{gameweek} {'FINAL CALL' if kind == 'final' else 'PREVIEW'}\n"
-            f"Deadline: {local} (Bhutan)\n\n"
+            f"Deadline: {deadline_local} Bhutan time ({left} left)\n\n"
         )
         if not self.settings.anthropic_api_key:
             return header + "ANTHROPIC_API_KEY is not set, so no briefing could be written."
@@ -211,7 +217,10 @@ class Advisor:
                 else "preview, about a day before the deadline. Give the plan and clearly flag "
                 "anything that depends on press conferences or team news."
             )
-            + f" The deadline is {deadline.isoformat()} UTC."
+            + f" Current time: {now_local} Bhutan time. Deadline: {deadline_local} Bhutan "
+            f"time. Time remaining: exactly {left}. Use these figures as given; do not work "
+            "out times yourself, and quote every time in Bhutan time (UTC+6) only, never UK "
+            "time or UTC."
         )
         try:
             return header + await self._ask_claude(task)
@@ -262,6 +271,12 @@ class Advisor:
         if not text:
             raise ValueError("Claude returned no text")
         return text
+
+
+def _time_left(delta: timedelta) -> str:
+    minutes = max(int(delta.total_seconds() // 60), 0)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m"
 
 
 def _availability_line(row: dict[str, Any]) -> str:
