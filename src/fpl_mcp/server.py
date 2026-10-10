@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
+from collections import deque
 from contextlib import asynccontextmanager, suppress
 from datetime import UTC, datetime
 from functools import wraps
@@ -14,7 +16,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from .advisor import Advisor
-from .alerts import telegram_configured
+from .alerts import send_message, telegram_configured
 from .analysis import FPLAnalysis
 from .client import FPLClient, source_records
 from .config import get_settings
@@ -244,6 +246,41 @@ async def get_auth_status() -> dict[str, Any]:
         **client.auth_status,
         "checked_at_utc": datetime.now(UTC).isoformat(),
     }
+
+
+SEND = ToolAnnotations(
+    readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True
+)
+TELEGRAM_HOURLY_LIMIT = 10
+_telegram_sends: deque[float] = deque()
+
+
+@mcp.tool(title="Send to Tashi's Telegram", annotations=SEND)
+async def send_telegram_message(
+    text: Annotated[
+        str,
+        Field(
+            min_length=1,
+            max_length=3500,
+            description="Plain text (no markdown); emojis are fine. Sent as-is.",
+        ),
+    ],
+) -> dict[str, Any]:
+    """Send an FPL briefing, verdict or alert to Tashi's own Telegram chat.
+
+    Only use this when Tashi asks for something to be sent to Telegram, or to
+    deliver a briefing he requested. Limited to 10 messages per hour.
+    """
+    if not telegram_configured(settings):
+        return {"sent": False, "error": "Telegram is not configured on the server"}
+    now = time.monotonic()
+    while _telegram_sends and now - _telegram_sends[0] > 3600:
+        _telegram_sends.popleft()
+    if len(_telegram_sends) >= TELEGRAM_HOURLY_LIMIT:
+        return {"sent": False, "error": "Hourly Telegram limit reached; try again later"}
+    _telegram_sends.append(now)
+    sent = await send_message(settings, text)
+    return {"sent": sent, "sent_at_utc": datetime.now(UTC).isoformat()}
 
 
 def build_app():

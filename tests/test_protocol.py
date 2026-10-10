@@ -30,8 +30,9 @@ def test_streamable_http_discovery_call_validation_and_host_guard():
         )
         assert initialized["serverInfo"]["name"] == "Tashi FPL Analyst"
         discovered = rpc("tools/list")["tools"]
-        assert len(discovered) == 17
-        assert all(tool["annotations"]["readOnlyHint"] for tool in discovered)
+        assert len(discovered) == 18
+        writers = {tool["name"] for tool in discovered if not tool["annotations"]["readOnlyHint"]}
+        assert writers == {"send_telegram_message"}
         assert all(tool.get("outputSchema") for tool in discovered)
         with respx.mock:
             respx.get("https://fantasy.premierleague.com/api/bootstrap-static/").mock(
@@ -88,3 +89,23 @@ def test_app_with_keepalive_starts_and_stops_cleanly(monkeypatch):
     with TestClient(build_app(), base_url="http://localhost") as client:
         response = client.get("/not-mcp")
         assert response.status_code == 404
+
+
+async def test_send_telegram_message_is_rate_limited(monkeypatch):
+    from fpl_mcp import server
+
+    sent: list[str] = []
+
+    async def fake_send(settings, text):
+        sent.append(text)
+        return True
+
+    monkeypatch.setattr(server, "send_message", fake_send)
+    monkeypatch.setattr(server, "telegram_configured", lambda settings: True)
+    server._telegram_sends.clear()
+
+    results = [await server.send_telegram_message(f"msg {i}") for i in range(11)]
+
+    assert all(result["sent"] for result in results[:10])
+    assert results[10] == {"sent": False, "error": "Hourly Telegram limit reached; try again later"}
+    assert len(sent) == 10
