@@ -21,6 +21,14 @@ class Settings(BaseSettings):
     alert_webhook_url: str | None = None
     # Proactive advisor: squad watch + pre-deadline briefings sent to Telegram/webhook.
     advisor_enabled: bool = False
+    # Free, self-hosted briefings: any OpenAI-compatible server, e.g. llama.cpp's
+    # llama-server ("http://10.0.0.5:8080/v1"). Used before ANTHROPIC_API_KEY.
+    llm_base_url: str | None = None
+    llm_model: str = "local"
+    llm_api_key: str | None = None
+    llm_timeout_seconds: float = Field(default=600, ge=30, le=1800)
+    llm_disable_thinking: bool = True
+    # Optional paid alternative to a local LLM; leave empty to never use the API.
     anthropic_api_key: str | None = None
     advisor_model: str = "claude-sonnet-5-5"
     advisor_mcp_url: str = "https://fpl.dcpl.bt/mcp"

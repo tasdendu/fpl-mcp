@@ -177,3 +177,83 @@ def test_split_message_respects_telegram_limit() -> None:
     chunks = split_message(text, limit=1000)
     assert all(len(chunk) <= 1000 for chunk in chunks)
     assert "".join(chunks).replace("\n", "") == text.replace("\n", "")
+
+
+class FullFakeAnalysis(FakeAnalysis):
+    async def my_team(self):
+        captain = pick(10, "Haaland")
+        captain.update(squad_position=10, position="Forward", is_captain=True)
+        return {
+            "picks": [captain],
+            "current_bank": 0.5,
+            "current_free_transfers": 1,
+            "chips": [{"name": "3xc", "status_for_entry": "available"}],
+        }
+
+    async def overview(self):
+        return {"next_gameweek": {"id": 6}}
+
+    async def fixtures(self, gameweek):
+        return {
+            "fixtures": [
+                {
+                    "home_team": "Liverpool",
+                    "away_team": "Man City",
+                    "home_difficulty": 4,
+                    "away_difficulty": 4,
+                }
+            ]
+        }
+
+    async def transfer_targets(self, position, max_price, horizon, limit):
+        return {"targets": [{"name": f"Target{position}", "price": 6.2, "form": 11.0}]}
+
+
+LLM_URL = "http://gpu.local:8080/v1/chat/completions"
+
+
+@respx.mock
+async def test_local_llm_writes_briefing_for_free_and_wins_over_paid_api(tmp_path) -> None:
+    advisor = make_advisor(
+        tmp_path, llm_base_url="http://gpu.local:8080/v1/", anthropic_api_key="sk-unused"
+    )
+    advisor.analysis = FullFakeAnalysis()
+    route = respx.post(LLM_URL).mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "choices": [
+                    {
+                        "message": {
+                            "content": "<think>reasoning</think>\nSTARTING XI\n🟢 Captain Haaland"
+                        }
+                    }
+                ]
+            },
+        )
+    )
+    claude = respx.post(ANTHROPIC_URL)
+
+    now = datetime(2026, 10, 10, 7, 0, tzinfo=UTC)
+    text = await advisor.brief(6, "final", DEADLINE, now)
+
+    assert text.endswith("STARTING XI\n🟢 Captain Haaland")
+    assert "<think>" not in text
+    assert not claude.called
+    prompt = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert "3h 00m left" in prompt
+    assert '"chips_available":["Triple Captain"]' in prompt
+    assert "Liverpool" in prompt and "Target3" in prompt
+    assert prompt.endswith("/no_think")
+
+
+@respx.mock
+async def test_local_llm_down_falls_back_to_rule_based_check(tmp_path) -> None:
+    advisor = make_advisor(tmp_path, llm_base_url="http://gpu.local:8080/v1")
+    advisor.analysis = FullFakeAnalysis()
+    respx.post(LLM_URL).mock(side_effect=httpx.ConnectError("refused"))
+
+    text = await advisor.brief(6, "final", DEADLINE, datetime(2026, 10, 10, 7, 0, tzinfo=UTC))
+
+    assert "Local LLM unavailable" in text
+    assert "CAPTAIN: Haaland" in text

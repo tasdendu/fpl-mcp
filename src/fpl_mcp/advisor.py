@@ -7,9 +7,10 @@ processes refreshing the same rotating token would invalidate each other).
   an injury/suspension flag, changes chance of playing, recovers, or changes
   price.
 * Deadline messages: a preview about a day before each deadline and a final
-  call a few hours before, each sent once. With ANTHROPIC_API_KEY they are full
-  Claude briefings (via the Messages API MCP connector); without it they are a
-  rule-based squad check (flags, captain, bench cover, bank, transfers, chips).
+  call a few hours before, each sent once. Written by, in order of preference:
+  a self-hosted LLM (LLM_BASE_URL, OpenAI-compatible, e.g. llama.cpp; free),
+  Claude (ANTHROPIC_API_KEY; paid, optional), or a rule-based squad check
+  (flags, captain, bench cover, bank, transfers, chips) needing neither.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import time
 from contextlib import closing
@@ -36,6 +38,40 @@ log = logging.getLogger(__name__)
 ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
 MCP_BETA = "mcp-client-2025-11-20"
 MCP_SERVER_NAME = "tashi-fpl"
+
+SQUAD_KEYS = (
+    "squad_position",
+    "name",
+    "team",
+    "position",
+    "selling_price",
+    "price",
+    "status",
+    "chance_next_round",
+    "news",
+    "form",
+    "points_per_game",
+    "expected_points_next",
+    "total_points",
+    "is_captain",
+    "is_vice_captain",
+)
+TARGET_KEYS = (
+    "name",
+    "team",
+    "price",
+    "status",
+    "chance_next_round",
+    "form",
+    "points_per_game",
+    "expected_points_next",
+    "total_points",
+    "heuristic_score",
+    "average_fixture_difficulty",
+)
+FIXTURE_KEYS = ("home_team", "away_team", "home_difficulty", "away_difficulty")
+
+THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL)
 
 CHIP_NAMES = {
     "wildcard": "Wildcard",
@@ -68,6 +104,12 @@ Format for Telegram as plain text: no markdown tables, no ** or # symbols. Use t
 sections in order: TRANSFERS, STARTING XI (by position), CAPTAIN / VICE-CAPTAIN, BENCH \
 ORDER, CHIP, WATCH LIST. End with a PUNDIT'S VERDICT section of 3-5 lines, each starting \
 with 🟢 (do it), 🟡 (watch) or 🔴 (risk). Keep the whole message under 2,500 characters."""
+
+LOCAL_SYSTEM_PROMPT = SYSTEM_PROMPT.split("Before advising", 1)[0] + (
+    "You are given Tashi's live squad, fixtures and a ranked transfer shortlist as JSON. "
+    "You have no tools; use only that data.\n\nHow to recommend:"
+    + SYSTEM_PROMPT.split("How to recommend:", 1)[1]
+)
 
 
 class Advisor:
@@ -215,6 +257,16 @@ class Advisor:
             f"⚽ GW{gameweek} {'FINAL CALL' if kind == 'final' else 'PREVIEW'}\n"
             f"Deadline: {deadline_local} Bhutan time ({left} left)\n\n"
         )
+        if self.settings.llm_base_url:
+            try:
+                return header + await self._ask_local_llm(kind, now_local, deadline_local, left)
+            except (httpx.HTTPError, ValueError, KeyError, FPLAPIError) as exc:
+                log.warning("Local LLM briefing failed: %s", exc)
+                return (
+                    header
+                    + f"(Local LLM unavailable: {exc}. Rule-based check instead.)\n\n"
+                    + await self.squad_check()
+                )
         if not self.settings.anthropic_api_key:
             return header + await self.squad_check()
         task = (
@@ -292,6 +344,77 @@ class Advisor:
         ]
         return "\n".join(lines)
 
+    async def briefing_context(self) -> str:
+        """Compact, factual input for a model without tool access."""
+        team = await self.analysis.my_team()
+        overview = await self.analysis.overview()
+        gameweek = (overview.get("next_gameweek") or {}).get("id")
+        fixtures = (await self.analysis.fixtures(gameweek)).get("fixtures", []) if gameweek else []
+        targets = {}
+        for position, label in ((1, "GK"), (2, "DEF"), (3, "MID"), (4, "FWD")):
+            rows = (await self.analysis.transfer_targets(position, None, 5, 8)).get("targets", [])
+            targets[label] = [_pick(row, TARGET_KEYS) for row in rows]
+        squad = [_pick(row, SQUAD_KEYS) for row in team.get("picks", [])]
+        chips = [
+            CHIP_NAMES.get(str(chip.get("name")), str(chip.get("name")))
+            for chip in team.get("chips", [])
+            if chip.get("status_for_entry") == "available"
+        ]
+        data = {
+            "bank_millions": team.get("current_bank"),
+            "free_transfers": team.get("current_free_transfers"),
+            "hit_cost_per_extra_transfer": 4,
+            "chips_available": chips,
+            "squad (squad_position 1-11 start, 12-15 bench in order)": squad,
+            f"gameweek_{gameweek}_fixtures (difficulty 1 easy - 5 hard)": [
+                _pick(row, FIXTURE_KEYS) for row in fixtures
+            ],
+            "top_transfer_targets_next_5_gameweeks_by_position": targets,
+        }
+        return json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+
+    async def _ask_local_llm(
+        self, kind: str, now_local: str, deadline_local: str, left: str
+    ) -> str:
+        context = await self.briefing_context()
+        task = (
+            (
+                "Final pre-deadline call: give definitive decisions."
+                if kind == "final"
+                else "Preview a day before the deadline: give the plan and flag what "
+                "depends on team news."
+            )
+            + f" Current time {now_local} Bhutan, deadline {deadline_local} Bhutan, {left} left; "
+            "quote times in Bhutan time only. Base every recommendation ONLY on this data "
+            "(selling_price + bank is the budget; never invent players, prices or fixtures):\n"
+            + context
+        )
+        if self.settings.llm_disable_thinking:
+            task += "\n/no_think"
+        headers = {"content-type": "application/json"}
+        if self.settings.llm_api_key:
+            headers["authorization"] = f"Bearer {self.settings.llm_api_key}"
+        async with httpx.AsyncClient(timeout=self.settings.llm_timeout_seconds) as http:
+            response = await http.post(
+                self.settings.llm_base_url.rstrip("/") + "/chat/completions",
+                headers=headers,
+                json={
+                    "model": self.settings.llm_model,
+                    "temperature": 0.3,
+                    "max_tokens": 2000,
+                    "messages": [
+                        {"role": "system", "content": LOCAL_SYSTEM_PROMPT},
+                        {"role": "user", "content": task},
+                    ],
+                },
+            )
+            response.raise_for_status()
+            text = response.json()["choices"][0]["message"]["content"] or ""
+        text = THINK_BLOCK.sub("", text).strip()
+        if not text:
+            raise ValueError("local LLM returned no text")
+        return text
+
     async def _ask_claude(self, task: str) -> str:
         headers = {
             "x-api-key": str(self.settings.anthropic_api_key),
@@ -335,6 +458,10 @@ class Advisor:
         if not text:
             raise ValueError("Claude returned no text")
         return text
+
+
+def _pick(row: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    return {key: row[key] for key in keys if row.get(key) not in (None, "", False)}
 
 
 def _time_left(delta: timedelta) -> str:
